@@ -198,6 +198,8 @@ function Base.getproperty(ncp::NCP, v::Symbol)
         (ncp.num_motor_neurons + ncp.num_motor_neurons + 1):(ncp.num_motor_neurons + ncp.num_motor_neurons + ncp.num_inter_neurons)
     elseif v == :num_layers
         3
+    elseif v == :units
+        ncp.wiring.units
     elseif v == :num_sensory_neurons
         ncp.wiring.input_dim
     elseif v == :sensory_neurons
