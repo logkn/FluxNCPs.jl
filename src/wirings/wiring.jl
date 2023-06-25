@@ -1,7 +1,7 @@
 mutable struct Wiring
     units::Int
-    adjacency_matrix::Matrix{Int}
-    sensory_adjacency_matrix::Union{Nothing, Matrix{Int}}
+    adjacency_matrix::Matrix{Float32}
+    sensory_adjacency_matrix::Union{Nothing, Matrix{Float32}}
     input_dim::Union{Nothing, Int}
     output_dim::Union{Nothing, Int}
 end
@@ -64,7 +64,7 @@ function add_synapse!(w::Wiring, src, dest, polarity)
     if polarity != 1 && polarity != -1
         throw(ErrorException("Cannot add synapse with polarity $polarity (expected -1 or +1)"))
     end
-    w.adjacency_matrix[src, dest] = polarity
+    w.adjacency_matrix[src, dest] = Float32(polarity)
 end
 
 function add_sensory_synapse!(w::Wiring, src, dest, polarity)
@@ -74,13 +74,13 @@ function add_sensory_synapse!(w::Wiring, src, dest, polarity)
     if src < 1 || src > w.input_dim
         throw(ErrorException("Cannot add sensory synapse originating in $src if input has only $(w.input_dim) features"))
     end
-    if dest < 1 || dest > w.input_dim
+    if dest < 1 || dest > w.units
         throw(ErrorException("Cannot add sensory synapse feeding into $dest if input has only $(w.input_dim) features"))
     end
     if polarity != 1 && polarity != -1
         throw(ErrorException("Cannot add sensory synapse with polarity $polarity (expected -1 or +1)"))
     end
-    w.sensory_adjacency_matrix[src, dest] = polarity
+    w.sensory_adjacency_matrix[src, dest] = Float32(polarity)
 end
 
 function Wiring(units::Int)
@@ -102,33 +102,30 @@ end
 
 mutable struct FullyConnected
     wiring::Wiring
-    rng::AbstractRNG
     self_connection::Bool
 end
 
-function FullyConnected(units; output_dim=nothing, erev_init_seed=1111, self_connections=true)
+function FullyConnected(units; output_dim=nothing, self_connections=true)
     w = Wiring(units)
     out_dim = isnothing(output_dim) ? units : output_dim
     set_output_dim!(w, out_dim)
-    rng = MersenneTwister(erev_init_seed)
-    rand()
     for src in 1:units
         for dest in 1:units
             if src == dest && !(self_connections)
                 continue
             end
-            polarity = rand(rng, [-1, 1, 1])
+            polarity = rand([-1, 1, 1])
             add_synapse!(w, src, dest, polarity)
         end
     end
-    FullyConnected(w, rng, self_connections)
+    FullyConnected(w, self_connections)
 end
 
 function build!(fc::FullyConnected, input_shape)
     build!(fc.wiring, input_shape)
     for src in 1:fc.wiring.input_dim
         for dest in 1:fc.wiring.units
-            polarity = rand(fc.rng, [-1, 1, 1])
+            polarity = rand([-1, 1, 1])
             add_sensory_synapse!(fc.wiring, src, dest, polarity)
         end
     end
@@ -138,7 +135,6 @@ end
 
 mutable struct NCP
     wiring::Wiring
-    rng::AbstractRNG
     num_inter_neurons::Int
     num_command_neurons::Int
     num_motor_neurons::Int
@@ -156,11 +152,9 @@ function NCP(
     inter_fanout,
     recurrent_command_synapses,
     motor_fanin;
-    seed=22222,
 )
     w = Wiring(inter_neurons + command_neurons + motor_neurons)
     set_output_dim!(w, motor_neurons)
-    rng = MersenneTwister(seed)
 
     if motor_fanin > command_neurons
         throw(ErrorException(
@@ -177,7 +171,6 @@ function NCP(
     else
         NCP(
             w,
-            rng,
             inter_neurons,
             command_neurons,
             motor_neurons,
@@ -195,7 +188,7 @@ function Base.getproperty(ncp::NCP, v::Symbol)
     elseif v == :command_neurons
         return (ncp.num_motor_neurons + 1) : (ncp.num_motor_neurons + ncp.num_command_neurons)
     elseif v == :inter_neurons
-        (ncp.num_motor_neurons + ncp.num_motor_neurons + 1):(ncp.num_motor_neurons + ncp.num_motor_neurons + ncp.num_inter_neurons)
+        (ncp.num_motor_neurons + ncp.num_command_neurons + 1):(ncp.num_motor_neurons + ncp.num_command_neurons + ncp.num_inter_neurons)
     elseif v == :num_layers
         3
     elseif v == :units
@@ -204,6 +197,14 @@ function Base.getproperty(ncp::NCP, v::Symbol)
         ncp.wiring.input_dim
     elseif v == :sensory_neurons
         1:ncp.wiring.input_dim
+    elseif v == :built
+        !isnothing(ncp.wiring.input_dim)
+    elseif v == :input_dim
+        ncp.wiring.input_dim
+    elseif v == :adjacency_matrix
+        ncp.wiring.adjacency_matrix
+    elseif v == :sensory_adjacency_matrix
+        ncp.wiring.sensory_adjacency_matrix
     else
         return getfield(ncp, v)
     end
@@ -234,14 +235,13 @@ function get_type_of_neuron(ncp::NCP, neuron_id)
 end
 
 function build_sensory_to_inter_layer!(ncp::NCP)
-    inters = ncp.inter_neurons
-    unreachable_inter_neurons = Set(inters)
+    unreachable_inter_neurons = Set(ncp.inter_neurons)
     for src in ncp.sensory_neurons
-        for dest in sample(ncp.rng, inters, ncp.sensory_fanout; replace=false)
+        for dest in sample(ncp.inter_neurons, ncp.sensory_fanout; replace=false)
             if dest in unreachable_inter_neurons
                 delete!(unreachable_inter_neurons, dest)
             end
-            polarity = rand(ncp.rng, [-1, 1])
+            polarity = rand([-1, 1])
             add_sensory_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -250,8 +250,8 @@ function build_sensory_to_inter_layer!(ncp::NCP)
     mean_inter_neuron_fanin = clamp(mean_inter_neuron_fanin |> floor |> Int, 1, ncp.num_sensory_neurons)
 
     for dest in unreachable_inter_neurons
-        for src in sample(ncp.rng, ncp.sensory_neurons, mean_inter_neuron_fanin; replace=false)
-            polarity = rand(ncp.rng, [-1, 1])
+        for src in sample(ncp.sensory_neurons, mean_inter_neuron_fanin; replace=false)
+            polarity = rand([-1, 1])
             add_sensory_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -260,11 +260,11 @@ end
 function build_inter_to_command_layer!(ncp::NCP)
     unreachable_inter_neurons = Set(ncp.command_neurons)
     for src in ncp.inter_neurons
-        for dest in sample(ncp.rng, ncp.command_neurons, ncp.inter_fanout; replace=false)
+        for dest in sample(ncp.command_neurons, ncp.inter_fanout; replace=false)
             if dest in unreachable_inter_neurons
                 delete!(unreachable_inter_neurons, dest)
             end
-            polarity = rand(ncp.rng, [-1, 1])
+            polarity = rand([-1, 1])
             add_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -273,8 +273,8 @@ function build_inter_to_command_layer!(ncp::NCP)
     mean_inter_neuron_fanin = clamp(mean_inter_neuron_fanin |> floor |> Int, 1, ncp.num_command_neurons)
 
     for dest in unreachable_inter_neurons
-        for src in sample(ncp.rng, ncp.inter_neurons, mean_inter_neuron_fanin; replace=false)
-            polarity = rand(ncp.rng, [-1, 1])
+        for src in sample(ncp.inter_neurons, mean_inter_neuron_fanin; replace=false)
+            polarity = rand([-1, 1])
             add_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -282,9 +282,9 @@ end
 
 function build_recurrent_command_layer!(ncp::NCP)
     for i in 1:ncp.recurrent_command_synapses
-        src = rand(ncp.rng, ncp.command_neurons)
-        dest = rand(ncp.rng, ncp.command_neurons)
-        polarity = rand(ncp.rng, [-1, 1])
+        src = rand(ncp.command_neurons)
+        dest = rand(ncp.command_neurons)
+        polarity = rand([-1, 1])
         add_synapse!(ncp.wiring, src, dest, polarity)
     end
 end
@@ -292,11 +292,11 @@ end
 function build_command_to_motor_layer!(ncp::NCP)
     unreachable_inter_neurons = Set(ncp.command_neurons)
     for dest in ncp.motor_neurons
-        for src in sample(ncp.rng, ncp.command_neurons, ncp.motor_fanin; replace=false)
+        for src in sample(ncp.command_neurons, ncp.motor_fanin; replace=false)
             if src in unreachable_inter_neurons
                 delete!(unreachable_inter_neurons, src)
             end
-            polarity = rand(ncp.rng, [-1, 1])
+            polarity = rand([-1, 1])
             add_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -305,8 +305,8 @@ function build_command_to_motor_layer!(ncp::NCP)
     mean_inter_neuron_fanin = clamp(mean_inter_neuron_fanin |> floor |> Int, 1, ncp.num_motor_neurons)
 
     for src in unreachable_inter_neurons
-        for dest in sample(ncp.rng, ncp.motor_neurons, mean_inter_neuron_fanin; replace=false)
-            polarity = rand(ncp.rng, [-1, 1]) 
+        for dest in sample(ncp.motor_neurons, mean_inter_neuron_fanin; replace=false)
+            polarity = rand([-1, 1]) 
             add_synapse!(ncp.wiring, src, dest, polarity)
         end
     end
@@ -321,8 +321,24 @@ function build!(ncp::NCP, input_shape)
     build_command_to_motor_layer!(ncp)
 end
 
+"""
+    AutoNCP(units, output_size; sparsity_level = 0.5)
 
-function AutoNCP(units, output_size; sparsity_level = 0.5, seed = 22222)
+Constructs a new AutoNCP with the given number of units and output size. The
+number of units must be greater than the output size plus 2. The sparsity level
+is a value between 0.0 and 0.9 that determines the density of the network. A
+sparsity level of 0.0 means that the network will be fully connected, while a
+sparsity level of 0.9 means that only 10% of the possible connections will be
+made.
+
+# Examples
+
+```julia
+julia> ncp = AutoNCP(100, 10)
+AutoNCP(100, 10, 0.5)
+```
+"""
+function AutoNCP(units, output_size; sparsity_level = 0.5)
     if output_size >= units - 2
         throw(ErrorException("Output size must be less than the number of units - 2"))
     elseif sparsity_level < .1 || sparsity_level > 1.0
@@ -345,6 +361,5 @@ function AutoNCP(units, output_size; sparsity_level = 0.5, seed = 22222)
         inter_fanout,
         recurrent_command_synapses,
         motor_fanin;
-        seed = seed
     )
 end
